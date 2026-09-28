@@ -1,0 +1,6 @@
+{
+  "name": "Classic 8-Ball & Stage Pool",
+  "description": "클래식 8볼 AI 대전과 스테이지 트릭샷 챌린지를 즐길 수 있는 정밀 물리 기반 모바일 웹 당구 게임",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
