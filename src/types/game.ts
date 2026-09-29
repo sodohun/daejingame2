@@ -50,7 +50,9 @@ export interface CueSpin {
   y: number; // -1 to 1 (draw to follow / backspin to topspin)
 }
 
-export type GameMode = 'stage' | 'ai_8ball' | 'free_practice';
+export type GameMode = 'stage' | '2p_8ball';
+
+export type PlayerId = 'player1' | 'player2';
 
 export type AIDifficulty = 'easy' | 'normal' | 'hard' | 'impossible';
 

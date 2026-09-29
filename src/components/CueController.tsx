@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState } from 'react';
 import { Target } from 'lucide-react';
 import { CueSpin } from '../types/game';
 
@@ -12,74 +12,11 @@ interface CueControllerProps {
 }
 
 export const CueController: React.FC<CueControllerProps> = ({
-  power,
-  onPowerChange,
-  onShoot,
   spin,
   onSpinChange,
-  disabled = false,
 }) => {
-  const sliderRef = useRef<HTMLDivElement>(null);
   const spinModalRef = useRef<HTMLDivElement>(null);
-  const [isDraggingPower, setIsDraggingPower] = useState(false);
   const [isSpinModalOpen, setIsSpinModalOpen] = useState(false);
-
-  // Power bar dragging logic
-  const handlePowerPointer = useCallback(
-    (clientY: number) => {
-      if (!sliderRef.current || disabled) return;
-      const rect = sliderRef.current.getBoundingClientRect();
-      const relativeY = clientY - rect.top;
-      // Pulling downward increases power: top = 0%, bottom = 100%
-      const rawRatio = relativeY / rect.height;
-      const clamped = Math.max(0, Math.min(1, rawRatio));
-      onPowerChange(clamped);
-    },
-    [disabled, onPowerChange]
-  );
-
-  const onPointerDownSlider = (e: React.PointerEvent) => {
-    if (disabled) return;
-    setIsDraggingPower(true);
-    e.currentTarget.setPointerCapture(e.pointerId);
-    handlePowerPointer(e.clientY);
-  };
-
-  const onPointerMoveSlider = (e: React.PointerEvent) => {
-    if (!isDraggingPower || disabled) return;
-    handlePowerPointer(e.clientY);
-  };
-
-  const onPointerUpSlider = (e: React.PointerEvent) => {
-    if (!isDraggingPower || disabled) return;
-    setIsDraggingPower(false);
-    try {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch {}
-
-    // If released with significant power, shoot!
-    if (power > 0.05) {
-      onShoot();
-    }
-  };
-
-  // Keyboard shortcut: Spacebar shoots or holds
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (disabled) return;
-      if (e.code === 'Space' && !e.repeat) {
-        e.preventDefault();
-        // Step power up or shoot
-        if (power > 0.1) {
-          onShoot();
-        } else {
-          onPowerChange(0.65);
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [disabled, power, onPowerChange, onShoot]);
 
   // Spin target selection
   const handleSpinPointer = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -102,11 +39,11 @@ export const CueController: React.FC<CueControllerProps> = ({
 
   return (
     <>
-      {/* Top-Right Spin Ball button (Exact visual from reference screenshot top right) */}
+      {/* Top-Right Spin Ball button */}
       <div className="absolute top-14 right-4 z-20 flex flex-col items-center">
         <button
           onClick={() => setIsSpinModalOpen((prev) => !prev)}
-          className="relative w-12 h-12 rounded-full bg-linear-to-b from-neutral-200 via-neutral-100 to-neutral-300 border-2 border-neutral-600 shadow-xl flex items-center justify-center transition-transform hover:scale-105 active:scale-95 group"
+          className="relative w-12 h-12 rounded-full bg-linear-to-b from-neutral-200 via-neutral-100 to-neutral-300 border-2 border-neutral-600 shadow-xl flex items-center justify-center transition-transform hover:scale-105 active:scale-95 group cursor-pointer"
           title="당점(스핀) 조절"
         >
           {/* Subtle 3D ball gradient */}
@@ -161,71 +98,12 @@ export const CueController: React.FC<CueControllerProps> = ({
                 onSpinChange({ x: 0, y: 0 });
                 setIsSpinModalOpen(false);
               }}
-              className="w-full py-1 text-xs bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700 transition"
+              className="w-full py-1 text-xs bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700 transition cursor-pointer"
             >
               중앙(무회전) 초기화
             </button>
           </div>
         )}
-      </div>
-
-      {/* Right Power Meter Slider (Matching reference image right slider) */}
-      <div className="absolute right-3 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center">
-        <div className="text-[11px] font-bold text-neutral-400 tracking-wider mb-2 uppercase">
-          POWER
-        </div>
-
-        {/* Outer Metal Frame */}
-        <div
-          ref={sliderRef}
-          onPointerDown={onPointerDownSlider}
-          onPointerMove={onPointerMoveSlider}
-          onPointerUp={onPointerUpSlider}
-          className={`relative w-12 h-72 bg-gradient-to-b from-neutral-850 via-neutral-900 to-neutral-950 rounded-xl border-2 border-neutral-700 shadow-2xl p-1.5 flex flex-col justify-end cursor-pointer touch-none select-none ${
-            disabled ? 'opacity-40 pointer-events-none' : 'hover:border-neutral-500'
-          }`}
-        >
-          {/* Inner Groove with Tick marks */}
-          <div className="relative w-full h-full bg-neutral-950 rounded-lg overflow-hidden border border-neutral-800 flex flex-col-reverse">
-            {/* Power Gradient Fill (Green -> Yellow -> Red) */}
-            <div
-              className="w-full transition-all duration-75 bg-linear-to-t from-emerald-500 via-amber-400 to-red-600 shadow-[0_0_15px_rgba(239,68,68,0.5)]"
-              style={{ height: `${Math.round(power * 100)}%` }}
-            />
-
-            {/* Scale markings */}
-            <div className="absolute inset-0 flex flex-col justify-between py-2 px-1 pointer-events-none opacity-40">
-              {[...Array(9)].map((_, i) => (
-                <div key={i} className="w-full flex justify-between items-center">
-                  <div className="h-0.5 w-2 bg-white" />
-                  <div className="h-0.5 w-1.5 bg-white/60" />
-                </div>
-              ))}
-            </div>
-
-            {/* Slider Handle Grip */}
-            <div
-              className="absolute left-1/2 -translate-x-1/2 w-10 h-4 bg-linear-to-b from-neutral-200 to-neutral-400 border border-neutral-600 rounded shadow-md pointer-events-none flex items-center justify-center"
-              style={{ bottom: `calc(${power * 100}% - 8px)` }}
-            >
-              <div className="w-5 h-0.5 bg-neutral-600 rounded" />
-            </div>
-          </div>
-        </div>
-
-        {/* Power percentage & Shoot Action button */}
-        <div className="mt-2 text-center">
-          <div className="text-xs font-mono font-bold text-amber-400">
-            {Math.round(power * 100)}%
-          </div>
-          <button
-            onClick={onShoot}
-            disabled={disabled || power < 0.05}
-            className="mt-1 px-3 py-1 bg-amber-500 hover:bg-amber-400 active:scale-95 disabled:opacity-40 disabled:pointer-events-none text-neutral-950 font-black text-xs rounded-md shadow-md uppercase tracking-wider transition"
-          >
-            샷 (발사)
-          </button>
-        </div>
       </div>
     </>
   );

@@ -1,10 +1,9 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import confetti from 'canvas-confetti';
-import { ChevronLeft, ChevronRight, RotateCcw, Play, Award, AlertCircle } from 'lucide-react';
-import { Ball, Pocket, TableDimensions, GameMode, CueSpin, StageConfig, AIDifficulty } from '../types/game';
+import { ChevronLeft, ChevronRight, RotateCcw, Play, Award, AlertCircle, Users } from 'lucide-react';
+import { Ball, Pocket, TableDimensions, GameMode, CueSpin, StageConfig, PlayerId } from '../types/game';
 import { BALL_COLORS, createRackBalls, getTablePockets, updateBallPhysics, calculateAimAssist, applyCueShot } from '../utils/physics';
 import { drawTable, drawBalls, drawAimAssist, drawCueStick } from '../utils/renderer';
-import { calculateAIShot, findBestBallInHandPosition } from '../utils/ai';
 import { STAGES } from '../utils/stages';
 import { sounds } from '../utils/audio';
 import { TopBar } from './TopBar';
@@ -38,24 +37,48 @@ export const PoolGame: React.FC = () => {
 
   // Game Modes & States
   const [mode, setMode] = useState<GameMode>('stage');
-  const [stageIndex, setStageIndex] = useState(0);
+  const [stageIndex, setStageIndex] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('pool_stage_index');
+      if (saved !== null) {
+        const parsed = parseInt(saved, 10);
+        if (!isNaN(parsed) && parsed >= 0 && parsed < STAGES.length) {
+          return parsed;
+        }
+      }
+    } catch {
+      // Ignore localStorage errors
+    }
+    return 0;
+  });
   const currentStage: StageConfig = STAGES[stageIndex] || STAGES[0];
+
+  // Persist stageIndex so switching modes never resets progress unless player resets
+  useEffect(() => {
+    try {
+      localStorage.setItem('pool_stage_index', stageIndex.toString());
+    } catch {
+      // Ignore
+    }
+  }, [stageIndex]);
 
   // Stage Specific State
   const [remainingShots, setRemainingShots] = useState(currentStage.maxShots);
   const [stageCleared, setStageCleared] = useState(false);
   const [stageFailed, setStageFailed] = useState(false);
 
-  // 8-Ball AI Specific State
-  const [turn, setTurn] = useState<'player' | 'ai'>('player');
-  const [aiDifficulty, setAiDifficulty] = useState<AIDifficulty>('normal');
-  const [isMatchStarted, setIsMatchStarted] = useState(false);
-  const [playerType, setPlayerType] = useState<'solid' | 'stripe' | null>(null);
-  const [aiType, setAiType] = useState<'solid' | 'stripe' | null>(null);
-  const [matchWinner, setMatchWinner] = useState<'player' | 'ai' | null>(null);
-  const [isAiThinking, setIsAiThinking] = useState(false);
+  // 2-Player 8-Ball Specific State
+  const [turn, setTurn] = useState<PlayerId>('player1');
+  const [player1Type, setPlayer1Type] = useState<'solid' | 'stripe' | null>(null);
+  const [player2Type, setPlayer2Type] = useState<'solid' | 'stripe' | null>(null);
+  const [matchWinner, setMatchWinner] = useState<PlayerId | null>(null);
   const [isBallInHand, setIsBallInHand] = useState(false);
   const [foulMessage, setFoulMessage] = useState<string | null>(null);
+  const [firstPottedInfo, setFirstPottedInfo] = useState<{
+    player: PlayerId;
+    group: 'solid' | 'stripe';
+    ballNumber: number;
+  } | null>(null);
 
   // Physics & Balls State
   const ballsRef = useRef<Ball[]>([]);
@@ -84,7 +107,6 @@ export const PoolGame: React.FC = () => {
     setStageFailed(false);
     setMatchWinner(null);
     setFoulMessage(null);
-    setIsMatchStarted(false);
     turnPottedRef.current = [];
 
     if (mode === 'stage') {
@@ -151,9 +173,10 @@ export const PoolGame: React.FC = () => {
       };
 
       ballsRef.current = [cueBall, ...rackedBalls];
-      setTurn('player');
-      setPlayerType(null);
-      setAiType(null);
+      setTurn('player1');
+      setPlayer1Type(null);
+      setPlayer2Type(null);
+      setFirstPottedInfo(null);
       setIsBallInHand(false);
       setAimAngle(0); // Aim directly at rack apex
     }
@@ -185,7 +208,7 @@ export const PoolGame: React.FC = () => {
 
   // Pointer Aiming & Power Handlers
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (isMoving || isAiThinking || (mode === 'ai_8ball' && turn === 'ai')) return;
+    if (isMoving) return;
     const { x, y } = getVirtualCoords(e.clientX, e.clientY);
 
     const cueBall = ballsRef.current.find((b) => b.id === 0);
@@ -198,9 +221,9 @@ export const PoolGame: React.FC = () => {
       rightClickStartPowerRef.current = power;
       e.currentTarget.setPointerCapture(e.pointerId);
 
-      // Also if power is 0, give an initial responsive power (e.g. 0.3)
+      // Also if power is 0, give an initial responsive power (e.g. 0.4)
       if (power < 0.05) {
-        setPower(0.3);
+        setPower(0.4);
       }
       return;
     }
@@ -220,7 +243,7 @@ export const PoolGame: React.FC = () => {
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (isMoving || isAiThinking) return;
+    if (isMoving) return;
 
     // Right-click dragging adjusts power! (Moving backward/downward increases power)
     if (isDraggingPowerRightClickRef.current) {
@@ -283,13 +306,13 @@ export const PoolGame: React.FC = () => {
 
   // Fine-tuning angle (0.1° ultra-fine and 0.5° fine for pinpoint pocketing accuracy)
   const adjustAimFine = (deltaDegrees: number) => {
-    if (isMoving || isAiThinking) return;
+    if (isMoving) return;
     setAimAngle((prev) => prev + (deltaDegrees * Math.PI) / 180);
   };
 
   // Execute shot
   const handleShootWithPower = useCallback((shotPower?: number) => {
-    if (isMoving || isAiThinking || (mode === 'ai_8ball' && turn === 'ai')) return;
+    if (isMoving) return;
     const cueBall = ballsRef.current.find((b) => b.id === 0);
     if (!cueBall || cueBall.isPotted) return;
 
@@ -303,10 +326,8 @@ export const PoolGame: React.FC = () => {
 
     if (mode === 'stage') {
       setRemainingShots((prev) => Math.max(0, prev - 1));
-    } else if (mode === 'ai_8ball') {
-      setIsMatchStarted(true);
     }
-  }, [isMoving, isAiThinking, mode, turn, power, aimAngle, spin]);
+  }, [isMoving, mode, power, aimAngle, spin]);
 
   const handleShoot = useCallback(() => {
     handleShootWithPower();
@@ -379,30 +400,28 @@ export const PoolGame: React.FC = () => {
       return;
     }
 
-    // B. 8-Ball AI Match Rules Evaluation
-    if (mode === 'ai_8ball') {
-      const isPlayerTurn = turn === 'player';
+    // B. 2-Player 8-Ball Match Rules Evaluation
+    if (mode === '2p_8ball') {
+      const isPlayer1 = turn === 'player1';
       const eightBallPotted = pottedBalls.some((b) => b.number === 8);
 
       // Check 8-ball potted condition
       if (eightBallPotted) {
         const solidsLeft = ballsRef.current.filter((b) => !b.isPotted && b.number >= 1 && b.number <= 7).length;
         const stripesLeft = ballsRef.current.filter((b) => !b.isPotted && b.number >= 9 && b.number <= 15).length;
-        const currentGroup = isPlayerTurn ? playerType : aiType;
+        const currentGroup = isPlayer1 ? player1Type : player2Type;
 
         let won = false;
         if (currentGroup === 'solid' && solidsLeft === 0 && !cueBallPotted) won = true;
         if (currentGroup === 'stripe' && stripesLeft === 0 && !cueBallPotted) won = true;
 
         if (won) {
-          setMatchWinner(isPlayerTurn ? 'player' : 'ai');
+          setMatchWinner(isPlayer1 ? 'player1' : 'player2');
           sounds.playVictory();
-          if (isPlayerTurn) {
-            confetti({ particleCount: 120, spread: 90, origin: { y: 0.6 } });
-          }
+          confetti({ particleCount: 120, spread: 90, origin: { y: 0.6 } });
         } else {
           // Illegal 8-ball pot (Instant Loss)
-          setMatchWinner(isPlayerTurn ? 'ai' : 'player');
+          setMatchWinner(isPlayer1 ? 'player2' : 'player1');
           sounds.playFoul();
         }
         return;
@@ -411,7 +430,7 @@ export const PoolGame: React.FC = () => {
       // Cue ball scratch (Foul)
       if (cueBallPotted) {
         sounds.playFoul();
-        setFoulMessage('수구(흰공) 스크래치 파울! 볼-인-핸드가 주어집니다.');
+        setFoulMessage('수구(흰공) 스크래치 파울! 상대 플레이어에게 프리볼(볼-인-핸드)이 주어집니다.');
         if (cueBall) {
           cueBall.isPotted = false;
           cueBall.x = dim.playingLeft + (dim.playingRight - dim.playingLeft) * 0.25;
@@ -421,11 +440,9 @@ export const PoolGame: React.FC = () => {
         }
 
         // Switch turn and grant Ball-in-Hand
-        const nextTurn = isPlayerTurn ? 'ai' : 'player';
+        const nextTurn: PlayerId = isPlayer1 ? 'player2' : 'player1';
         setTurn(nextTurn);
-        if (nextTurn === 'player') {
-          setIsBallInHand(true);
-        }
+        setIsBallInHand(true);
         return;
       }
 
@@ -433,21 +450,29 @@ export const PoolGame: React.FC = () => {
       let keepTurn = false;
       const objectPotted = pottedBalls.filter((b) => b.number >= 1 && b.number <= 15 && b.number !== 8);
 
-      if (objectPotted.length > 0 && !playerType) {
+      if (objectPotted.length > 0 && !player1Type && !player2Type) {
         const first = objectPotted[0];
-        const group = first.number <= 7 ? 'solid' : 'stripe';
-        const otherGroup = group === 'solid' ? 'stripe' : 'solid';
-        if (isPlayerTurn) {
-          setPlayerType(group);
-          setAiType(otherGroup);
+        const group: 'solid' | 'stripe' = first.number <= 7 ? 'solid' : 'stripe';
+        const otherGroup: 'solid' | 'stripe' = group === 'solid' ? 'stripe' : 'solid';
+
+        // Record first potted ball info
+        setFirstPottedInfo({
+          player: turn,
+          group,
+          ballNumber: first.number,
+        });
+
+        if (isPlayer1) {
+          setPlayer1Type(group);
+          setPlayer2Type(otherGroup);
           keepTurn = true;
         } else {
-          setAiType(group);
-          setPlayerType(otherGroup);
+          setPlayer2Type(group);
+          setPlayer1Type(otherGroup);
           keepTurn = true;
         }
       } else if (objectPotted.length > 0) {
-        const currentGroup = isPlayerTurn ? playerType : aiType;
+        const currentGroup = isPlayer1 ? player1Type : player2Type;
         const matched = objectPotted.some((b) =>
           currentGroup === 'solid' ? b.number <= 7 : b.number >= 9 && b.number <= 15
         );
@@ -457,58 +482,10 @@ export const PoolGame: React.FC = () => {
       }
 
       if (!keepTurn) {
-        setTurn((prev) => (prev === 'player' ? 'ai' : 'player'));
+        setTurn((prev) => (prev === 'player1' ? 'player2' : 'player1'));
       }
     }
-  }, [mode, remainingShots, currentStage, turn, playerType, aiType, dim.playingLeft, dim.playingRight, dim.playingTop, dim.playingBottom]);
-
-  // AI Turn Execution
-  useEffect(() => {
-    if (mode !== 'ai_8ball' || turn !== 'ai' || isMoving || matchWinner) return;
-
-    setIsAiThinking(true);
-    let shotTimer: NodeJS.Timeout;
-
-    const thinkTimer = setTimeout(() => {
-      const cueBall = ballsRef.current.find((b) => b.id === 0);
-      if (!cueBall) {
-        setIsAiThinking(false);
-        return;
-      }
-
-      // If cue ball was potted or ball in hand, place it strategically for AI
-      if (cueBall.isPotted) {
-        cueBall.isPotted = false;
-        if (aiDifficulty === 'hard' || aiDifficulty === 'impossible') {
-          const smartPos = findBestBallInHandPosition(ballsRef.current, aiType, pockets, dim);
-          cueBall.x = smartPos.x;
-          cueBall.y = smartPos.y;
-        } else {
-          cueBall.x = dim.playingLeft + (dim.playingRight - dim.playingLeft) * 0.25;
-          cueBall.y = dim.playingTop + (dim.playingBottom - dim.playingTop) / 2;
-        }
-        cueBall.vx = 0;
-        cueBall.vy = 0;
-      }
-
-      // Calculate AI angle and power with selected difficulty
-      const shot = calculateAIShot(cueBall, ballsRef.current, aiType, pockets, dim, aiDifficulty);
-      setAimAngle(shot.angle);
-
-      // Cue shot execution after aiming delay
-      shotTimer = setTimeout(() => {
-        applyCueShot(cueBall, shot.angle, shot.power, { x: 0, y: 0 });
-        setIsMoving(true);
-        setIsAiThinking(false);
-        turnPottedRef.current = [];
-      }, 650);
-    }, 850);
-
-    return () => {
-      clearTimeout(thinkTimer);
-      clearTimeout(shotTimer);
-    };
-  }, [mode, turn, isMoving, matchWinner, aiType, aiDifficulty, pockets, dim]);
+  }, [mode, remainingShots, currentStage, turn, player1Type, player2Type, dim.playingLeft, dim.playingRight, dim.playingTop, dim.playingBottom]);
 
   // Main 60 FPS Physics & Render Loop
   useEffect(() => {
@@ -590,16 +567,16 @@ export const PoolGame: React.FC = () => {
     return b && !b.isPotted;
   }).length;
 
-  const playerPottedCount = ballsRef.current.filter((b) => {
-    if (b.isPotted && playerType) {
-      return playerType === 'solid' ? b.number >= 1 && b.number <= 7 : b.number >= 9 && b.number <= 15;
+  const player1PottedCount = ballsRef.current.filter((b) => {
+    if (b.isPotted && player1Type) {
+      return player1Type === 'solid' ? b.number >= 1 && b.number <= 7 : b.number >= 9 && b.number <= 15;
     }
     return false;
   }).length;
 
-  const aiPottedCount = ballsRef.current.filter((b) => {
-    if (b.isPotted && aiType) {
-      return aiType === 'solid' ? b.number >= 1 && b.number <= 7 : b.number >= 9 && b.number <= 15;
+  const player2PottedCount = ballsRef.current.filter((b) => {
+    if (b.isPotted && player2Type) {
+      return player2Type === 'solid' ? b.number >= 1 && b.number <= 7 : b.number >= 9 && b.number <= 15;
     }
     return false;
   }).length;
@@ -622,16 +599,25 @@ export const PoolGame: React.FC = () => {
         onOpenRules={() => setShowRules(true)}
         onChangeMode={(m) => {
           setMode(m);
+        }}
+        maxStages={STAGES.length}
+        onSelectStage={(idx) => {
+          setStageIndex(idx);
+        }}
+        onResetStageProgress={() => {
           setStageIndex(0);
+          try {
+            localStorage.setItem('pool_stage_index', '0');
+          } catch {
+            // Ignore
+          }
         }}
         turn={turn}
-        playerType={playerType}
-        aiType={aiType}
-        playerPottedCount={playerPottedCount}
-        aiPottedCount={aiPottedCount}
-        aiDifficulty={aiDifficulty}
-        isMatchStarted={isMatchStarted}
-        onChangeAIDifficulty={setAiDifficulty}
+        player1Type={player1Type}
+        player2Type={player2Type}
+        player1PottedCount={player1PottedCount}
+        player2PottedCount={player2PottedCount}
+        firstPottedInfo={firstPottedInfo}
       />
 
       {/* Center Table Area (Scales smoothly to viewport while maintaining 2:1 aspect ratio) */}
@@ -661,21 +647,40 @@ export const PoolGame: React.FC = () => {
             <div className="text-[9px] font-bold text-neutral-400 mt-2">CUE</div>
           </div>
 
-          {/* AI Thinking Notice Badge */}
-          {isAiThinking && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-neutral-900/90 border border-emerald-500/50 text-emerald-400 px-4 py-1.5 rounded-full text-xs font-bold shadow-lg flex items-center gap-2 animate-pulse pointer-events-none">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+          {/* Current Turn Banner on Table (2P Mode) */}
+          {mode === '2p_8ball' && (
+            <div
+              className={`absolute top-3 left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-full text-xs font-black shadow-lg flex items-center gap-2 pointer-events-none transition-all z-20 ${
+                turn === 'player1'
+                  ? 'bg-amber-500 text-neutral-950 ring-2 ring-amber-300'
+                  : 'bg-sky-500 text-neutral-950 ring-2 ring-sky-300'
+              }`}
+            >
+              <Users className="w-4 h-4" />
               <span>
-                AI 당구봇({aiDifficulty === 'easy' ? '쉬움' : aiDifficulty === 'normal' ? '보통' : aiDifficulty === 'hard' ? '어려움' : '불가능'})이 최적의 샷 각도를 계산 중입니다...
+                {turn === 'player1' ? '플레이어 1' : '플레이어 2'}의 샷 차례입니다!{' '}
+                {turn === 'player1' && player1Type
+                  ? `(${player1Type === 'solid' ? '단색' : '줄무늬'})`
+                  : turn === 'player2' && player2Type
+                  ? `(${player2Type === 'solid' ? '단색' : '줄무늬'})`
+                  : '(공 배정 전)'}
               </span>
+            </div>
+          )}
+
+          {/* Foul Message Notice */}
+          {foulMessage && !isBallInHand && (
+            <div className="absolute top-12 left-1/2 -translate-x-1/2 bg-red-950/90 border border-red-500 text-red-200 px-4 py-1.5 rounded-full text-xs font-bold shadow-lg flex items-center gap-2 pointer-events-none animate-pulse z-20">
+              <AlertCircle className="w-4 h-4 text-red-400" />
+              <span>{foulMessage}</span>
             </div>
           )}
 
           {/* Ball in Hand Notice */}
           {isBallInHand && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-sky-950/90 border border-sky-400 text-sky-200 px-4 py-1.5 rounded-full text-xs font-bold shadow-lg flex items-center gap-2 pointer-events-none animate-bounce">
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-sky-950/90 border border-sky-400 text-sky-200 px-4 py-1.5 rounded-full text-xs font-bold shadow-lg flex items-center gap-2 pointer-events-none animate-bounce z-20">
               <AlertCircle className="w-4 h-4 text-sky-400" />
-              테이블 위 원하는 위치를 터치/클릭하여 수구를 배치하세요
+              {turn === 'player1' ? '플레이어 1' : '플레이어 2'} 프리볼: 테이블 위 원하는 위치를 터치/클릭하여 수구를 배치하세요
             </div>
           )}
 
@@ -687,16 +692,16 @@ export const PoolGame: React.FC = () => {
             {/* Counter-Clockwise (Left) fine adjustments */}
             <button
               onClick={() => adjustAimFine(-0.5)}
-              disabled={isMoving || isAiThinking}
-              className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 active:scale-95 disabled:opacity-40 text-neutral-300 text-xs font-bold rounded-lg border border-neutral-700 transition"
+              disabled={isMoving}
+              className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 active:scale-95 disabled:opacity-40 text-neutral-300 text-xs font-bold rounded-lg border border-neutral-700 transition cursor-pointer"
               title="반시계방향 -0.5° 조정"
             >
               -0.5°
             </button>
             <button
               onClick={() => adjustAimFine(-0.1)}
-              disabled={isMoving || isAiThinking}
-              className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 active:scale-95 disabled:opacity-40 text-xs font-black rounded-lg border border-amber-500/40 transition flex items-center gap-0.5"
+              disabled={isMoving}
+              className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 active:scale-95 disabled:opacity-40 text-xs font-black rounded-lg border border-amber-500/40 transition flex items-center gap-0.5 cursor-pointer"
               title="초정밀 반시계방향 -0.1° 조정"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
@@ -708,8 +713,8 @@ export const PoolGame: React.FC = () => {
             {/* Clockwise (Right) fine adjustments */}
             <button
               onClick={() => adjustAimFine(0.1)}
-              disabled={isMoving || isAiThinking}
-              className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 active:scale-95 disabled:opacity-40 text-xs font-black rounded-lg border border-amber-500/40 transition flex items-center gap-0.5"
+              disabled={isMoving}
+              className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 active:scale-95 disabled:opacity-40 text-xs font-black rounded-lg border border-amber-500/40 transition flex items-center gap-0.5 cursor-pointer"
               title="초정밀 시계방향 +0.1° 조정"
             >
               +0.1°
@@ -717,8 +722,8 @@ export const PoolGame: React.FC = () => {
             </button>
             <button
               onClick={() => adjustAimFine(0.5)}
-              disabled={isMoving || isAiThinking}
-              className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 active:scale-95 disabled:opacity-40 text-neutral-300 text-xs font-bold rounded-lg border border-neutral-700 transition"
+              disabled={isMoving}
+              className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 active:scale-95 disabled:opacity-40 text-neutral-300 text-xs font-bold rounded-lg border border-neutral-700 transition cursor-pointer"
               title="시계방향 +0.5° 조정"
             >
               +0.5°
@@ -726,14 +731,14 @@ export const PoolGame: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Power Slider & Spin Widget */}
+        {/* Right Spin Widget */}
         <CueController
           power={power}
           onPowerChange={setPower}
           onShoot={handleShoot}
           spin={spin}
           onSpinChange={setSpin}
-          disabled={isMoving || isAiThinking || (mode === 'ai_8ball' && turn === 'ai')}
+          disabled={isMoving}
         />
       </div>
 
@@ -752,7 +757,7 @@ export const PoolGame: React.FC = () => {
             <div className="flex gap-2 w-full">
               <button
                 onClick={initBoard}
-                className="flex-1 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-bold rounded-xl border border-neutral-700 transition flex items-center justify-center gap-1"
+                className="flex-1 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-bold rounded-xl border border-neutral-700 transition flex items-center justify-center gap-1 cursor-pointer"
               >
                 <RotateCcw className="w-4 h-4" />
                 다시하기
@@ -762,7 +767,7 @@ export const PoolGame: React.FC = () => {
                   onClick={() => {
                     setStageIndex((prev) => prev + 1);
                   }}
-                  className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 text-neutral-950 text-xs font-extrabold rounded-xl shadow-lg transition flex items-center justify-center gap-1"
+                  className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 text-neutral-950 text-xs font-extrabold rounded-xl shadow-lg transition flex items-center justify-center gap-1 cursor-pointer"
                 >
                   <Play className="w-4 h-4 fill-current" />
                   다음 스테이지
@@ -770,11 +775,11 @@ export const PoolGame: React.FC = () => {
               ) : (
                 <button
                   onClick={() => {
-                    setMode('ai_8ball');
+                    setMode('2p_8ball');
                   }}
-                  className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 text-xs font-extrabold rounded-xl shadow-lg transition flex items-center justify-center gap-1"
+                  className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 text-xs font-extrabold rounded-xl shadow-lg transition flex items-center justify-center gap-1 cursor-pointer"
                 >
-                  8볼 대전하기
+                  2인 포켓볼 게임하기
                 </button>
               )}
             </div>
@@ -796,7 +801,7 @@ export const PoolGame: React.FC = () => {
 
             <button
               onClick={initBoard}
-              className="w-full py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs font-extrabold rounded-xl shadow-lg transition flex items-center justify-center gap-1.5"
+              className="w-full py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs font-extrabold rounded-xl shadow-lg transition flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <RotateCcw className="w-4 h-4" />
               다시 도전하기
@@ -805,29 +810,27 @@ export const PoolGame: React.FC = () => {
         </div>
       )}
 
-      {/* 8-Ball Match Winner Modal */}
+      {/* 2-Player 8-Ball Match Winner Modal */}
       {matchWinner && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
           <div className="bg-neutral-900 border border-neutral-700 rounded-2xl p-6 max-w-sm w-full shadow-2xl text-center flex flex-col items-center">
             <div
               className={`w-16 h-16 rounded-full flex items-center justify-center mb-3 text-3xl ${
-                matchWinner === 'player' ? 'bg-amber-500/20 text-amber-400' : 'bg-red-500/20 text-red-400'
+                matchWinner === 'player1' ? 'bg-amber-500/20 text-amber-400' : 'bg-sky-500/20 text-sky-400'
               }`}
             >
-              {matchWinner === 'player' ? '🏆' : '🤖'}
+              🏆
             </div>
             <h2 className="text-xl font-extrabold text-white mb-1">
-              {matchWinner === 'player' ? '플레이어 승리!' : 'AI 당구봇 승리!'}
+              {matchWinner === 'player1' ? '플레이어 1 승리!' : '플레이어 2 승리!'}
             </h2>
             <p className="text-sm text-neutral-400 mb-5">
-              {matchWinner === 'player'
-                ? '8번 공을 완벽하게 포켓에 넣어 승리하셨습니다!'
-                : 'AI 당구봇이 게임에서 승리했습니다.'}
+              {matchWinner === 'player1' ? '플레이어 1' : '플레이어 2'}이(가) 자신의 목적구를 모두 넣고 마지막 8번 공을 완벽하게 포켓에 넣어 경기에서 승리했습니다!
             </p>
 
             <button
               onClick={initBoard}
-              className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 text-xs font-extrabold rounded-xl shadow-lg transition flex items-center justify-center gap-1.5"
+              className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 text-xs font-extrabold rounded-xl shadow-lg transition flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <RotateCcw className="w-4 h-4" />
               새 경기 시작
@@ -848,8 +851,7 @@ export const PoolGame: React.FC = () => {
               <div className="bg-neutral-800/80 p-2.5 rounded-lg border border-neutral-700">
                 <span className="font-bold text-amber-400 block mb-1">조준 및 발사:</span>
                 • <strong className="text-emerald-400">좌클릭 드래그</strong>: 당구대 어디서든 조준 방향을 360° 회전합니다.
-                <br />• <strong className="text-amber-400">우클릭 당겼다 놓기</strong>: 마우스 우클릭을 누른 채 뒤로 당겨 파워를 맞추고, <strong>우클릭을 놓으면 즉시 샷이 발사</strong>됩니다!
-                <br />• <strong className="text-sky-400">우측 세로 슬라이더</strong>: 모바일 터치 및 마우스로 우측 바를 끌어당긴 뒤 놓아도 발사됩니다.
+                <br />• <strong className="text-amber-400">우클릭 당겼다 놓기 (Pull & Release)</strong>: 마우스 우클릭을 누른 채 뒤로 당겨 파워를 맞추고, <strong>우클릭을 놓으면 즉시 샷이 발사</strong>됩니다! (큐대 뒤에 실시간 미니 파워 게이지가 표시됩니다)
                 <br />• <strong className="text-purple-400">초정밀 미세조정</strong>: 하단 좌우 <strong className="text-amber-300">±0.1°</strong> 및 <strong className="text-neutral-200">±0.5°</strong> 버튼 또는 <strong>마우스 휠(Wheel)</strong>로 아주 섬세한 각도 튜닝이 가능합니다.
               </div>
 
@@ -859,15 +861,16 @@ export const PoolGame: React.FC = () => {
               </div>
 
               <div className="bg-neutral-800/80 p-2.5 rounded-lg border border-neutral-700">
-                <span className="font-bold text-amber-400 block mb-1">8볼 대전 규칙:</span>
-                • 먼저 포켓에 들어간 공에 따라 단색(1~7번) 또는 줄무늬(9~15번) 진영이 배정됩니다.
-                <br />• 자신의 목적구를 모두 넣은 뒤 마지막으로 8번 검은색 공을 넣어야 승리합니다.
+                <span className="font-bold text-amber-400 block mb-1">2인 포켓볼 게임 규칙:</span>
+                • 플레이어 1과 플레이어 2가 한 턴씩 번갈아 샷을 진행합니다.
+                <br />• <strong>처음 목적구를 넣은 플레이어</strong>의 공에 따라 <strong>단색(1~7번)</strong> 또는 <strong>줄무늬(9~15번)</strong> 진영이 배정되며 상단에 즉시 표시됩니다.
+                <br />• 자신의 목적구를 모두 포켓팅한 뒤 마지막으로 8번 검은색 공을 넣어야 최종 승리합니다.
               </div>
             </div>
 
             <button
               onClick={() => setShowRules(false)}
-              className="mt-4 w-full py-2 bg-neutral-800 hover:bg-neutral-700 text-white font-bold text-xs rounded-xl border border-neutral-600 transition"
+              className="mt-4 w-full py-2 bg-neutral-800 hover:bg-neutral-700 text-white font-bold text-xs rounded-xl border border-neutral-600 transition cursor-pointer"
             >
               닫기
             </button>
